@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { EmbeddingsManager, EmbeddedChunk } from './embeddings';
+import { FullPage } from './documentProcessor';
 
 export interface RAGResponse {
   answer: string;
@@ -190,7 +191,7 @@ export class RAGQueryEngine {
     };
   }
 
-  private buildContext(chunks: EmbeddedChunk[], maxSources: number = 8, fullPages: any[] = []): string {
+  private buildContext(chunks: EmbeddedChunk[], maxSources: number = 8, fullPages: FullPage[] = []): string {
     // Адаптивный лимит контекста в зависимости от количества источников
     const maxContextLength = maxSources > 15 ? 15000 : maxSources > 10 ? 12000 : 8000;
     let totalLength = 0;
