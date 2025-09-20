@@ -642,7 +642,12 @@ export class RAGQueryEngine {
     return [...primary, ...secondary, ...others];
   }
 
-  private async delayIfNeeded(): Promise<void> {\n    const delayMs = 2000;\n    await new Promise(resolve => setTimeout(resolve, delayMs));\n  }\n\n  private countTokens(text: string): number {
+  private async delayIfNeeded(): Promise<void> {
+    const delayMs = 2000;
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+
+  private countTokens(text: string): number {
     return estimateTokens(text);
   }
 
