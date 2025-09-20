@@ -1,6 +1,11 @@
-import OpenAI from 'openai';
+﻿import OpenAI from 'openai';
+import { getEncoding, Tiktoken } from 'js-tiktoken';
 import { EmbeddingsManager, EmbeddedChunk } from './embeddings';
 import { FullPage } from './documentProcessor';
+import { planReport } from '@/services/reportPlanner';
+import { createPartQueries, scoreChunksForPart, PartQuery } from '@/services/partPlanning';
+import { describeDocumentCoverage } from '@/services/documentDiagnostics';
+import { LengthRequest, PartPlan, ReportPlan } from '@/types/research';
 
 export interface RAGResponse {
   answer: string;
@@ -13,6 +18,148 @@ export interface RAGResponse {
   }>;
   tokensUsed: number;
   cost: number;
+}
+
+interface LengthPreferences extends LengthRequest {
+  totalRequestedTokens: number;
+}
+
+interface RetrievalPlan {
+  chunkLimit: number;
+  pageLimit: number;
+  maxContextTokens: number;
+}
+
+interface ContextBuildResult {
+  text: string;
+  chunks: EmbeddedChunk[];
+  pages: FullPage[];
+}
+
+interface PartGenerationResult {
+  plan: PartPlan;
+  text: string;
+  sources: ContextBuildResult;
+  tokensUsed: number;
+  cost: number;
+}
+
+const MODEL_OUTPUT_TOKEN_LIMIT = 16000;
+const MODEL_CONTEXT_TOKEN_LIMIT = 120000;
+const CONTEXT_SAFETY_MARGIN = 2000;
+const MIN_OUTPUT_TOKENS = 512;
+const DEFAULT_TOKENS_PER_PART = 900;
+const RATE_LIMIT_TOKENS_PER_REQUEST = 30000;
+const RATE_LIMIT_SAFETY_MARGIN = 2500;
+const DEFAULT_PART_BUFFER_RATIO = 1.25;
+
+const DETAIL_KEYWORDS = [
+  'ÃÂ¸Ã‘ÂÃ‘ÂÃÂ»ÃÂµÃÂ´',
+  'analysis',
+  'review',
+  'ÃÂ´ÃÂ¾ÃÂºÃÂ»ÃÂ°ÃÂ´',
+  'research',
+  'ÃÂ¾ÃÂ±ÃÂ·ÃÂ¾Ã‘â‚¬',
+  'strategy',
+  'Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ°Ã‘â€šÃÂµÃÂ³',
+  'comprehensive',
+  'ÃÂ¿ÃÂ¾ÃÂ´Ã‘â‚¬ÃÂ¾ÃÂ±',
+  'deep dive'
+];
+
+const DIAGNOSTIC_KEYWORDS = [
+  'list files',
+  'list documents',
+  'show files',
+  'ÃÂºÃÂ°ÃÂºÃÂ¸ÃÂµ Ã‘â€žÃÂ°ÃÂ¹ÃÂ»Ã‘â€¹',
+  'Ã‘ÂÃÂºÃÂ¾ÃÂ»Ã‘Å’ÃÂºÃÂ¾ Ã‘â€žÃÂ°ÃÂ¹ÃÂ»ÃÂ¾ÃÂ²',
+  'ÃÂºÃÂ°ÃÂºÃÂ¸ÃÂµ ÃÂ´ÃÂ¾ÃÂºÃ‘Æ’ÃÂ¼ÃÂµÃÂ½Ã‘â€šÃ‘â€¹',
+  'document summary',
+  'document status'
+];
+
+const RU_SYSTEM_PROMPT = [
+  'Ãâ€™Ã‘â€¹ Ã¢â‚¬â€ Ã‘ÂÃÂ¸Ã‘ÂÃ‘â€šÃÂµÃÂ¼ÃÂ° ÃÂ°ÃÂ½ÃÂ°ÃÂ»ÃÂ¸ÃÂ·ÃÂ° ÃÂ´ÃÂ¾ÃÂºÃ‘Æ’ÃÂ¼ÃÂµÃÂ½Ã‘â€šÃÂ¾ÃÂ² Ã‘Â ÃÂ´ÃÂ¾Ã‘ÂÃ‘â€šÃ‘Æ’ÃÂ¿ÃÂ¾ÃÂ¼ ÃÂº ÃÂ¸ÃÂ·ÃÂ²ÃÂ»ÃÂµÃ‘â€¡Ã‘â€˜ÃÂ½ÃÂ½Ã‘â€¹ÃÂ¼ Ã‘â€žÃ‘â‚¬ÃÂ°ÃÂ³ÃÂ¼ÃÂµÃÂ½Ã‘â€šÃÂ°ÃÂ¼ ÃÂ¸ Ã‘â€ ÃÂµÃÂ»Ã‘â€¹ÃÂ¼ Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ°ÃÂ½ÃÂ¸Ã‘â€ ÃÂ°ÃÂ¼.',
+  'ÃÅ¾Ã‘â€šÃÂ²ÃÂµÃ‘â€¡ÃÂ°ÃÂ¹Ã‘â€šÃÂµ Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ¾ÃÂ³ÃÂ¾ ÃÂ½ÃÂ° ÃÂ¾Ã‘ÂÃÂ½ÃÂ¾ÃÂ²ÃÂµ ÃÂ¿ÃÂµÃ‘â‚¬ÃÂµÃÂ´ÃÂ°ÃÂ½ÃÂ½ÃÂ¾ÃÂ³ÃÂ¾ ÃÂºÃÂ¾ÃÂ½Ã‘â€šÃÂµÃÂºÃ‘ÂÃ‘â€šÃÂ°. Ãâ€¢Ã‘ÂÃÂ»ÃÂ¸ ÃÂ´ÃÂ°ÃÂ½ÃÂ½Ã‘â€¹Ã‘â€¦ ÃÂ½ÃÂµÃÂ´ÃÂ¾Ã‘ÂÃ‘â€šÃÂ°Ã‘â€šÃÂ¾Ã‘â€¡ÃÂ½ÃÂ¾, ÃÂ¿Ã‘â‚¬Ã‘ÂÃÂ¼ÃÂ¾ Ã‘Æ’ÃÂºÃÂ°ÃÂ¶ÃÂ¸Ã‘â€šÃÂµ Ã‘ÂÃ‘â€šÃÂ¾.',
+  'ÃÂÃÂµ ÃÂ¿Ã‘â‚¬ÃÂ¸ÃÂ´Ã‘Æ’ÃÂ¼Ã‘â€¹ÃÂ²ÃÂ°ÃÂ¹Ã‘â€šÃÂµ Ã‘â€žÃÂ°ÃÂºÃ‘â€šÃ‘â€¹ ÃÂ¸ ÃÂ½ÃÂµ Ã‘â€ ÃÂ¸Ã‘â€šÃÂ¸Ã‘â‚¬Ã‘Æ’ÃÂ¹Ã‘â€šÃÂµ ÃÂ½ÃÂµÃ‘ÂÃ‘Æ’Ã‘â€°ÃÂµÃ‘ÂÃ‘â€šÃÂ²Ã‘Æ’Ã‘Å½Ã‘â€°ÃÂ¸ÃÂµ ÃÂ¸Ã‘ÂÃ‘â€šÃÂ¾Ã‘â€¡ÃÂ½ÃÂ¸ÃÂºÃÂ¸.',
+  'Ãâ€™Ã‘ÂÃÂµÃÂ³ÃÂ´ÃÂ° ÃÂ¿Ã‘â‚¬ÃÂ¸ÃÂ²ÃÂ¾ÃÂ´ÃÂ¸Ã‘â€šÃÂµ Ã‘ÂÃ‘ÂÃ‘â€¹ÃÂ»ÃÂºÃÂ¸ ÃÂ½ÃÂ° ÃÂ¸Ã‘ÂÃ‘â€šÃÂ¾Ã‘â€¡ÃÂ½ÃÂ¸ÃÂºÃÂ¸ ÃÂ² Ã‘â€žÃÂ¾Ã‘â‚¬ÃÂ¼ÃÂ°Ã‘â€šÃÂµ [ÃËœÃÂ¼Ã‘Â Ã‘â€žÃÂ°ÃÂ¹ÃÂ»ÃÂ°, Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ°ÃÂ½ÃÂ¸Ã‘â€ ÃÂ° X] ÃÂ´ÃÂ»Ã‘Â ÃÂ¿ÃÂ¾ÃÂ»ÃÂ½Ã‘â€¹Ã‘â€¦ Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ°ÃÂ½ÃÂ¸Ã‘â€  ÃÂ¸ [ÃËœÃÂ¼Ã‘Â Ã‘â€žÃÂ°ÃÂ¹ÃÂ»ÃÂ°, Ã‘â‚¬ÃÂ°ÃÂ·ÃÂ´ÃÂµÃÂ» X] ÃÂ´ÃÂ»Ã‘Â Ã‘â€žÃ‘â‚¬ÃÂ°ÃÂ³ÃÂ¼ÃÂµÃÂ½Ã‘â€šÃÂ¾ÃÂ².',
+  'ÃÅ¸ÃÂ¸Ã‘Ë†ÃÂ¸Ã‘â€šÃÂµ ÃÂ¾Ã‘â€šÃÂ²ÃÂµÃ‘â€šÃ‘â€¹ ÃÂ¸Ã‘ÂÃÂºÃÂ»Ã‘Å½Ã‘â€¡ÃÂ¸Ã‘â€šÃÂµÃÂ»Ã‘Å’ÃÂ½ÃÂ¾ ÃÂ½ÃÂ° Ã‘â‚¬Ã‘Æ’Ã‘ÂÃ‘ÂÃÂºÃÂ¾ÃÂ¼ Ã‘ÂÃÂ·Ã‘â€¹ÃÂºÃÂµ.'
+].join('\n');
+
+const EN_SYSTEM_PROMPT = [
+  'You are a document-analysis assistant with access to retrieved fragments and full pages.',
+  'Answer strictly using the provided context. If information is missing, say so explicitly.',
+  'Do not invent facts and do not cite materials that are not in the context.',
+  'Always cite sources in the format [File name, page X] for full pages and [File name, section X] for fragments.',
+  'Respond in English only.'
+].join('\n');
+
+let tokenEncoder: Tiktoken | null = null;
+
+function getTokenEncoder(): Tiktoken | null {
+  if (!tokenEncoder) {
+    try {
+      tokenEncoder = getEncoding('cl100k_base');
+    } catch {
+      tokenEncoder = null;
+    }
+  }
+  return tokenEncoder;
+}
+
+function isDiagnosticsRequest(request: string): boolean {
+  const lower = request.toLowerCase();
+  return DIAGNOSTIC_KEYWORDS.some(keyword => lower.includes(keyword));
+}
+
+function mergeChunks(primary: EmbeddedChunk[], secondary: EmbeddedChunk[]): EmbeddedChunk[] {
+  const map = new Map<string, EmbeddedChunk>();
+  [...primary, ...secondary].forEach(chunk => {
+    if (!map.has(chunk.id)) {
+      map.set(chunk.id, chunk);
+    }
+  });
+  return Array.from(map.values());
+}
+
+function filterPagesForChunks(pages: FullPage[], chunks: EmbeddedChunk[]): FullPage[] {
+  if (pages.length === 0 || chunks.length === 0) {
+    return [];
+  }
+
+  const pageKey = (page: FullPage) => `${page.filename}-${page.pageNumber}`;
+  const needed = new Set<string>();
+
+  chunks.forEach(chunk => {
+    if (chunk.metadata.sectionType === 'page') {
+      needed.add(`${chunk.metadata.filename}-${chunk.metadata.sectionNumber}`);
+    }
+  });
+
+  return pages.filter(page => needed.has(pageKey(page)));
+}
+
+function composePartSearchQuery(question: string, partQuery: PartQuery): string {
+  return [
+    question,
+    `Focus topic: ${partQuery.plan.title}`,
+    `Keywords: ${partQuery.focusKeywords.join(', ')}`
+  ].join('\n');
+}
+
+function estimateTokens(text: string): number {
+  if (!text) {
+    return 0;
+  }
+  const encoder = getTokenEncoder();
+  if (encoder) {
+    try {
+      return encoder.encode(text).length;
+    } catch {
+      // fall back to heuristic
+    }
+  }
+  return Math.ceil(text.length / 4);
 }
 
 export class RAGQueryEngine {
@@ -28,292 +175,503 @@ export class RAGQueryEngine {
   }
 
   async query(question: string, maxSources?: number, language: 'ru' | 'en' = 'ru'): Promise<RAGResponse> {
-    // Адаптивный выбор количества источников и токенов
-    let maxTokens = 2000; // По умолчанию
-
-    if (!maxSources) {
-      const questionLower = question.toLowerCase();
-      if (questionLower.includes('list') || questionLower.includes('all') ||
-          questionLower.includes('перечисли') || questionLower.includes('все') ||
-          questionLower.includes('read') || questionLower.includes('прочитай') ||
-          questionLower.includes('detailed') || questionLower.includes('подробно') ||
-          questionLower.includes('analysis') || questionLower.includes('анализ')) {
-        maxSources = 25; // Для списков и полного анализа
-        maxTokens = 8000; // Большой лимит для детального анализа
-      } else if (questionLower.includes('compare') || questionLower.includes('сравни') ||
-                 questionLower.includes('difference') || questionLower.includes('различия')) {
-        maxSources = 15; // Для сравнений
-        maxTokens = 4000; // Средний лимит
-      } else {
-        maxSources = 8; // Для обычных вопросов
-        maxTokens = 2000; // Обычный лимит
-      }
-    }
-
-    // Проверяем на запросы создания контента (части, разделы)
-    const isContentCreation = question.includes('части') || question.includes('разделы') ||
-                              question.includes('sections') || question.includes('токенов') ||
-                              question.includes('tokens') || /\d+\s*(части|part|раздел|section)/.test(question);
-
-    if (isContentCreation) {
-      maxTokens = 16000; // Максимальный лимит для gpt-4o
-    }
-
-    // НОВОЕ: Двухэтапный поиск
-    // 1. Найти релевантные полные страницы
-    const relevantPages = await this.embeddings.findRelevantPages(question, 5);
-
-    // 2. Найти chunks из релевантных страниц
-    const relevantChunks = await this.embeddings.searchSimilar(question, maxSources);
-
-    // Фильтруем chunks только из релевантных страниц (для лучшей точности)
-    const pageNumbers = new Set(relevantPages.map(page => page.pageNumber));
-    const filteredChunks = relevantChunks.filter(chunk =>
-      pageNumbers.has(chunk.metadata.sectionNumber)
-    );
-
-    if (filteredChunks.length === 0) {
+    const trimmedQuestion = question.trim();
+    if (!trimmedQuestion) {
       return {
-        answer: 'Извините, я не нашел релевантной информации в загруженных документах для ответа на ваш вопрос.',
+        answer: language === 'ru'
+          ? 'Ãâ€”ÃÂ°ÃÂ¿Ã‘â‚¬ÃÂ¾Ã‘Â ÃÂ¿Ã‘Æ’Ã‘ÂÃ‘â€š. ÃÅ¸ÃÂ¾ÃÂ¶ÃÂ°ÃÂ»Ã‘Æ’ÃÂ¹Ã‘ÂÃ‘â€šÃÂ°, Ã‘ÂÃ‘â€žÃÂ¾Ã‘â‚¬ÃÂ¼Ã‘Æ’ÃÂ»ÃÂ¸Ã‘â‚¬Ã‘Æ’ÃÂ¹Ã‘â€šÃÂµ ÃÂ²ÃÂ¾ÃÂ¿Ã‘â‚¬ÃÂ¾Ã‘Â.'
+          : 'The query is empty. Please provide a question.',
         sources: [],
         tokensUsed: 0,
         cost: 0
       };
     }
 
-    // Build context from relevant pages + chunks
-    const context = this.buildContext(filteredChunks, maxSources, relevantPages);
+    if (isDiagnosticsRequest(trimmedQuestion)) {
+      const summary = await describeDocumentCoverage(this.embeddings);
+      return {
+        answer: summary,
+        sources: [],
+        tokensUsed: 0,
+        cost: 0
+      };
+    }
 
-    // Create prompt
-    const prompt = this.createPrompt(question, context, language);
+    const lengthPreferences = this.extractLengthPreferences(trimmedQuestion);
+    const reportPlan = this.buildReportPlan(trimmedQuestion, lengthPreferences);
 
-    // Language-specific system prompts
-    const systemPrompts = {
-      ru: `Вы - система анализа документов. У вас есть доступ к содержимому загруженных файлов через предоставленный контекст.
+    if (lengthPreferences.totalRequestedTokens > MODEL_OUTPUT_TOKEN_LIMIT * reportPlan.parts.length) {
+      const message = language === 'ru'
+        ? 'Ãâ€”ÃÂ°ÃÂ¿Ã‘â‚¬ÃÂ¾Ã‘Ë†ÃÂµÃÂ½ÃÂ½Ã‘â€¹ÃÂ¹ ÃÂ¾ÃÂ±Ã‘Å Ã‘â€˜ÃÂ¼ ÃÂ¿Ã‘â‚¬ÃÂµÃÂ²Ã‘â€¹Ã‘Ë†ÃÂ°ÃÂµÃ‘â€š ÃÂ¼ÃÂ°ÃÂºÃ‘ÂÃÂ¸ÃÂ¼ÃÂ°ÃÂ»Ã‘Å’ÃÂ½ÃÂ¾ ÃÂ¿ÃÂ¾ÃÂ´ÃÂ´ÃÂµÃ‘â‚¬ÃÂ¶ÃÂ¸ÃÂ²ÃÂ°ÃÂµÃÂ¼Ã‘â€¹ÃÂ¹ ÃÂ´ÃÂ°ÃÂ¶ÃÂµ ÃÂ¿Ã‘â‚¬ÃÂ¸ Ã‘â‚¬ÃÂ°ÃÂ·ÃÂ±ÃÂ¸ÃÂµÃÂ½ÃÂ¸ÃÂ¸ ÃÂ¿ÃÂ¾ Ã‘â€¡ÃÂ°Ã‘ÂÃ‘â€šÃ‘ÂÃÂ¼. ÃÂ£ÃÂ¼ÃÂµÃÂ½Ã‘Å’Ã‘Ë†ÃÂ¸Ã‘â€šÃÂµ Ã‘â€šÃ‘â‚¬ÃÂµÃÂ±ÃÂ¾ÃÂ²ÃÂ°ÃÂ½ÃÂ¸Ã‘Â.'
+        : 'The requested length exceeds what can be generated even when split into parts. Please reduce the requirements.';
+      return {
+        answer: message,
+        sources: [],
+        tokensUsed: 0,
+        cost: 0
+      };
+    }
 
-          ВАЖНО: Вы МОЖЕТЕ и ДОЛЖНЫ читать и анализировать содержимое документов из контекста.
-
-          Ваши возможности:
-          - Читать и анализировать все документы из контекста
-          - Отвечать на вопросы о содержимом файлов
-          - Перечислять файлы и их содержимое
-          - Находить информацию в документах
-          - Создавать подробные, детальные ответы любой длины
-          - Писать развернутые анализы и отчеты
-
-          ПРАВИЛА ОТВЕТОВ:
-          - Если пользователь просит создать части/разделы с указанием токенов - создавайте ПОЛНЫЕ разделы указанной длины
-          - ТРЕБОВАНИЕ: Каждая часть должна содержать минимум 800-1200 токенов (примерно 3-5 абзацев)
-          - Для запросов анализа, списков, чтения - давайте максимально подробные ответы
-          - Используйте ВСЮ доступную информацию из контекста
-          - НЕ сокращайте ответы до нескольких предложений
-          - ВАЖНО: Развернуто объясняйте каждый пункт, приводите примеры, детали и контекст
-          - Если пользователь указал количество токенов - это СТРОГОЕ требование к длине
-
-          ВАЖНО ПРО ССЫЛКИ:
-          - Ссылайтесь только на страницы, которые показаны ПОЛНОСТЬЮ в разделе "ПОЛНЫЕ СТРАНИЦЫ"
-          - Используйте формат [Название файла, стр. X] только для полных страниц
-          - Для фрагментов используйте [Фрагмент из файла, стр. X]
-          - Будьте точны в ссылках - не утверждайте больше, чем видите
-
-          Если нужной информации нет в контексте, скажите об этом честно.
-          Отвечайте на русском языке.`,
-      en: `You are a document analysis system. You have access to uploaded file contents through the provided context.
-
-          IMPORTANT: You CAN and SHOULD read and analyze document content from the context.
-
-          Your capabilities:
-          - Read and analyze all documents from the context
-          - Answer questions about file contents
-          - List files and their contents
-          - Find information in documents
-          - Create detailed, comprehensive responses of any length
-          - Write thorough analyses and reports
-
-          RESPONSE RULES:
-          - If user requests parts/sections with token specifications - create FULL sections of specified length
-          - REQUIREMENT: Each part must contain minimum 800-1200 tokens (approximately 3-5 paragraphs)
-          - For analysis, listing, reading requests - provide maximally detailed responses
-          - Use ALL available information from the context
-          - DO NOT shorten responses to just a few sentences
-          - IMPORTANT: Explain each point thoroughly, provide examples, details and context
-          - If user specifies token count - this is a STRICT length requirement
-
-          IMPORTANT ABOUT REFERENCES:
-          - Only reference pages that are shown COMPLETELY in "FULL PAGES" section
-          - Use format [File name, page X] only for full pages
-          - For fragments use [Fragment from file, page X]
-          - Be precise in references - don't claim more than you see
-
-          If the needed information is not in the context, say so honestly.
-          Answer in English.`
-    };
-
-    // Query OpenAI
-    const response = await this.openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [
-        {
-          role: 'system',
-          content: systemPrompts[language]
-        },
-        {
-          role: 'user',
-          content: prompt
-        }
-      ],
-      temperature: 0.7,
-      max_tokens: maxTokens
+    const retrievalPlan = this.buildRetrievalPlan(trimmedQuestion, lengthPreferences, maxSources);
+    const basePages = await this.embeddings.findRelevantPages(trimmedQuestion, retrievalPlan.pageLimit);
+    const baseChunks = await this.embeddings.searchSimilar(trimmedQuestion, {
+      topK: retrievalPlan.chunkLimit,
+      ensurePerDocument: true
     });
 
-    const answer = response.choices[0]?.message?.content || 'Извините, не удалось получить ответ.';
-    const tokensUsed = response.usage?.total_tokens || 0;
+    const partQueries = createPartQueries(trimmedQuestion, reportPlan.parts);
+    const systemPrompt = this.getSystemPrompt(language);
 
-    // GPT-4o pricing: $5 per 1M input tokens, $15 per 1M output tokens
-    const inputTokens = response.usage?.prompt_tokens || 0;
-    const outputTokens = response.usage?.completion_tokens || 0;
-    const cost = (inputTokens / 1000000) * 5 + (outputTokens / 1000000) * 15;
+    const partResults: PartGenerationResult[] = [];
+    let totalTokensUsed = 0;
+    let totalCost = 0;
 
-    // Process sources
-    const sources = filteredChunks.map((chunk, index) => ({
-      filename: chunk.metadata.filename,
-      sectionNumber: chunk.metadata.sectionNumber,
-      sectionType: chunk.metadata.sectionType,
-      content: chunk.content.substring(0, 200) + '...',
-      relevance: 1 - (index / filteredChunks.length) // Simple relevance score
-    }));
+    for (const partQuery of partQueries) {
+      const result = await this.generatePart(
+        trimmedQuestion,
+        partQuery,
+        baseChunks,
+        basePages,
+        retrievalPlan,
+        systemPrompt,
+        language
+      );
+      partResults.push(result);
+      totalTokensUsed += result.tokensUsed;
+      totalCost += result.cost;
+    }
+
+    const answer = partResults
+      .map(({ plan, text }) => {
+        const countedTokens = estimateTokens(text);
+        return [
+          `**Part ${plan.index}: ${plan.title}**`,
+          '',
+          text,
+          '',
+          `_Approximate length: ~${countedTokens} tokens_`
+        ].join('\n');
+      })
+      .join('\n\n');
+
+    const aggregatedSources = this.aggregateSources(partResults);
 
     return {
       answer,
-      sources,
+      sources: aggregatedSources,
+      tokensUsed: totalTokensUsed,
+      cost: totalCost
+    };
+  }
+
+  getEmbeddingsManager(): EmbeddingsManager {
+    return this.embeddings;
+  }
+
+  private async generatePart(
+    originalQuestion: string,
+    partQuery: PartQuery,
+    baseChunks: EmbeddedChunk[],
+    basePages: FullPage[],
+    retrievalPlan: RetrievalPlan,
+    systemPrompt: string,
+    language: 'ru' | 'en'
+  ): Promise<PartGenerationResult> {
+    const searchQuery = composePartSearchQuery(originalQuestion, partQuery);
+    const additionalChunks = await this.embeddings.searchSimilar(searchQuery, {
+      topK: Math.max(40, Math.floor(retrievalPlan.chunkLimit / 2)),
+      ensurePerDocument: true
+    });
+
+    const mergedChunks = mergeChunks(baseChunks, additionalChunks);
+    const rankedChunks = scoreChunksForPart(partQuery.plan, mergedChunks).slice(0, retrievalPlan.chunkLimit);
+    const relatedPages = filterPagesForChunks(basePages, rankedChunks);
+    const context = this.buildContext(rankedChunks, relatedPages, retrievalPlan.maxContextTokens);
+
+    if (!context.text.trim()) {
+      const fallback = language === 'ru'
+        ? 'ÃÂÃÂµ Ã‘Æ’ÃÂ´ÃÂ°ÃÂ»ÃÂ¾Ã‘ÂÃ‘Å’ ÃÂ¿ÃÂ¾ÃÂ´ÃÂ¾ÃÂ±Ã‘â‚¬ÃÂ°Ã‘â€šÃ‘Å’ ÃÂºÃÂ¾ÃÂ½Ã‘â€šÃÂµÃÂºÃ‘ÂÃ‘â€š ÃÂ´ÃÂ»Ã‘Â ÃÂ´ÃÂ°ÃÂ½ÃÂ½ÃÂ¾ÃÂ¹ Ã‘â€¡ÃÂ°Ã‘ÂÃ‘â€šÃÂ¸. Ãâ€™ÃÂ¾ÃÂ·ÃÂ¼ÃÂ¾ÃÂ¶ÃÂ½ÃÂ¾, Ã‘ÂÃÂ¾ÃÂ¾Ã‘â€šÃÂ²ÃÂµÃ‘â€šÃ‘ÂÃ‘â€šÃÂ²Ã‘Æ’Ã‘Å½Ã‘â€°ÃÂ¸ÃÂµ ÃÂ¼ÃÂ°Ã‘â€šÃÂµÃ‘â‚¬ÃÂ¸ÃÂ°ÃÂ»Ã‘â€¹ ÃÂ¾Ã‘â€šÃ‘ÂÃ‘Æ’Ã‘â€šÃ‘ÂÃ‘â€šÃÂ²Ã‘Æ’Ã‘Å½Ã‘â€š ÃÂ² ÃÂ·ÃÂ°ÃÂ³Ã‘â‚¬Ã‘Æ’ÃÂ¶ÃÂµÃÂ½ÃÂ½Ã‘â€¹Ã‘â€¦ ÃÂ´ÃÂ¾ÃÂºÃ‘Æ’ÃÂ¼ÃÂµÃÂ½Ã‘â€šÃÂ°Ã‘â€¦.'
+        : 'No relevant context was found for this section. The uploaded documents may not contain matching information.';
+      return {
+        plan: partQuery.plan,
+        text: fallback,
+        sources: context,
+        tokensUsed: 0,
+        cost: 0
+      };
+    }
+
+    const maxTokens = Math.min(
+      MODEL_OUTPUT_TOKEN_LIMIT,
+      Math.max(
+        MIN_OUTPUT_TOKENS,
+        Math.floor((partQuery.plan.tokens ?? DEFAULT_TOKENS_PER_PART) * DEFAULT_PART_BUFFER_RATIO)
+      )
+    );
+
+    const { text, tokensUsed, cost } = await this.generateWithContext(
+      systemPrompt,
+      originalQuestion,
+      partQuery,
+      context,
+      maxTokens,
+      language
+    );
+
+    return {
+      plan: partQuery.plan,
+      text,
+      sources: context,
       tokensUsed,
       cost
     };
   }
 
-  private buildContext(chunks: EmbeddedChunk[], maxSources: number = 8, fullPages: FullPage[] = []): string {
-    // Адаптивный лимит контекста в зависимости от количества источников
-    const maxContextLength = maxSources > 15 ? 15000 : maxSources > 10 ? 12000 : 8000;
-    let totalLength = 0;
-    const selectedChunks: EmbeddedChunk[] = [];
+  private async generateWithContext(
+    systemPrompt: string,
+    originalQuestion: string,
+    partQuery: PartQuery,
+    context: ContextBuildResult,
+    maxTokens: number,
+    language: 'ru' | 'en'
+  ): Promise<{ text: string; tokensUsed: number; cost: number }> {
+    const contextChunks = [...context.chunks];
+    const contextPages = [...context.pages];
+    let contextText = this.formatContext(contextPages, contextChunks);
+    let userPrompt = this.createPartPrompt(originalQuestion, partQuery, contextText, language);
 
-    for (const chunk of chunks) {
-      const chunkText = `[Источник ${selectedChunks.length + 1}: ${chunk.metadata.filename}, ${this.getSectionLabel(chunk.metadata.sectionType, chunk.metadata.sectionNumber)}]\n${chunk.content}\n---\n`;
+    const allowedRequestTokens = RATE_LIMIT_TOKENS_PER_REQUEST - RATE_LIMIT_SAFETY_MARGIN;
+    let promptTokens = this.estimatePromptTokens(systemPrompt, userPrompt);
 
-      if (totalLength + chunkText.length > maxContextLength && selectedChunks.length > 0) {
-        break; // Прекращаем добавление, если превышаем лимит
+    while (promptTokens + maxTokens > allowedRequestTokens && (contextChunks.length > 1 || contextPages.length > 0)) {
+      if (contextChunks.length > 1) {
+        contextChunks.pop();
+      } else if (contextPages.length > 0) {
+        contextPages.pop();
+      } else {
+        break;
       }
-
-      selectedChunks.push(chunk);
-      totalLength += chunkText.length;
+      contextText = this.formatContext(contextPages, contextChunks);
+      userPrompt = this.createPartPrompt(originalQuestion, partQuery, contextText, language);
+      promptTokens = this.estimatePromptTokens(systemPrompt, userPrompt);
     }
 
-    // НОВОЕ: Сначала показываем полные страницы, потом chunks
-    let context = '';
+    await this.delayIfNeeded();
+    const response = await this.openai.chat.completions.create({
+      model: 'gpt-4o',
+      temperature: 0.6,
+      max_tokens: Math.max(MIN_OUTPUT_TOKENS, Math.min(maxTokens, allowedRequestTokens - promptTokens)),
+      messages: [
+        {
+          role: 'system',
+          content: systemPrompt
+        },
+        {
+          role: 'user',
+          content: userPrompt
+        }
+      ]
+    });
 
-    // Добавляем полные страницы если есть
-    if (fullPages.length > 0) {
-      context += '=== ПОЛНЫЕ СТРАНИЦЫ ДЛЯ СПРАВКИ ===\n\n';
-      fullPages.forEach((page, index) => {
-        context += `СТРАНИЦА ${page.pageNumber} (${page.filename}):\n${page.fullContent}\n\n`;
+    const choice = response.choices[0];
+    let answer = choice?.message?.content?.trim() ?? '';
+
+    if (!answer) {
+      answer = language === 'ru'
+        ? 'ÃÅ“ÃÂ¾ÃÂ´ÃÂµÃÂ»Ã‘Å’ ÃÂ½ÃÂµ ÃÂ²ÃÂµÃ‘â‚¬ÃÂ½Ã‘Æ’ÃÂ»ÃÂ° Ã‘ÂÃÂ¾ÃÂ´ÃÂµÃ‘â‚¬ÃÂ¶ÃÂ°Ã‘â€šÃÂµÃÂ»Ã‘Å’ÃÂ½Ã‘â€¹ÃÂ¹ ÃÂ¾Ã‘â€šÃÂ²ÃÂµÃ‘â€š. ÃÅ¸ÃÂ¾ÃÂ¿Ã‘â‚¬ÃÂ¾ÃÂ±Ã‘Æ’ÃÂ¹Ã‘â€šÃÂµ ÃÂ¿ÃÂµÃ‘â‚¬ÃÂµÃ‘â€žÃÂ¾Ã‘â‚¬ÃÂ¼Ã‘Æ’ÃÂ»ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃ‘Å’ ÃÂ·ÃÂ°ÃÂ¿Ã‘â‚¬ÃÂ¾Ã‘Â.'
+        : 'The model did not return a meaningful answer. Please reformulate your request.';
+    }
+
+    if (choice?.finish_reason === 'length') {
+      answer += language === 'ru'
+        ? '\n\n[ÃÂ¡ÃÂ¸Ã‘ÂÃ‘â€šÃÂµÃÂ¼ÃÂ½ÃÂ¾ÃÂµ ÃÂ¿Ã‘â‚¬ÃÂ¸ÃÂ¼ÃÂµÃ‘â€¡ÃÂ°ÃÂ½ÃÂ¸ÃÂµ: ÃÂ¾Ã‘â€šÃÂ²ÃÂµÃ‘â€š ÃÂ±Ã‘â€¹ÃÂ» ÃÂ¾ÃÂ±Ã‘â‚¬ÃÂµÃÂ·ÃÂ°ÃÂ½ ÃÂ¿ÃÂ¾ ÃÂ»ÃÂ¸ÃÂ¼ÃÂ¸Ã‘â€šÃ‘Æ’ Ã‘â€šÃÂ¾ÃÂºÃÂµÃÂ½ÃÂ¾ÃÂ².]'
+        : '\n\n[System note: the answer was truncated due to the token limit.]';
+    }
+
+    const tokensUsed = response.usage?.total_tokens ?? 0;
+    const cost = this.calculateCost(response.usage);
+
+    return {
+      text: answer,
+      tokensUsed,
+      cost
+    };
+  }
+
+  private buildReportPlan(question: string, lengthPreferences: LengthPreferences): ReportPlan {
+    const normalizedLength: LengthRequest = {
+      parts: lengthPreferences.parts,
+      tokensPerPart: lengthPreferences.tokensPerPart,
+      explicitParts: lengthPreferences.explicitParts,
+      explicitTokens: lengthPreferences.explicitTokens
+    };
+
+    return planReport(question, normalizedLength);
+  }
+
+  private aggregateSources(results: PartGenerationResult[]): RAGResponse['sources'] {
+    const collected = new Map<string, {
+      filename: string;
+      sectionNumber: number;
+      sectionType: 'page' | 'paragraph' | 'sheet' | 'line';
+      content: string;
+      relevance: number;
+    }>();
+
+    results.forEach((result) => {
+      const { pages, chunks } = result.sources;
+
+      pages.forEach((page, index) => {
+        const key = `page-${page.filename}-${page.pageNumber}`;
+        if (!collected.has(key)) {
+          collected.set(key, {
+            filename: page.filename,
+            sectionNumber: page.pageNumber,
+            sectionType: 'page',
+            content: page.fullContent.slice(0, 400) + (page.fullContent.length > 400 ? '...' : ''),
+            relevance: 1 - index / Math.max(pages.length, 1)
+          });
+        }
       });
-      context += '=== РЕЛЕВАНТНЫЕ ФРАГМЕНТЫ ===\n\n';
+
+      chunks.forEach((chunk, index) => {
+        const key = `chunk-${chunk.id}`;
+        if (!collected.has(key)) {
+          collected.set(key, {
+            filename: chunk.metadata.filename,
+            sectionNumber: chunk.metadata.sectionNumber,
+            sectionType: chunk.metadata.sectionType,
+            content: chunk.content.slice(0, 400) + (chunk.content.length > 400 ? '...' : ''),
+            relevance: 1 - index / Math.max(chunks.length, 1)
+          });
+        }
+      });
+    });
+
+    return Array.from(collected.values());
+  }
+
+  private extractLengthPreferences(question: string): LengthPreferences {
+    const partsMatch = question.match(/(\d+)\s*(?:Ã‘â€¡ÃÂ°Ã‘ÂÃ‘â€š(?:ÃÂµÃÂ¹|ÃÂ¸)?|Ã‘â‚¬ÃÂ°ÃÂ·ÃÂ´ÃÂµÃÂ»(?:ÃÂ¾ÃÂ²|ÃÂ°)?|parts?|sections?)/i);
+    const tokensMatch = question.match(/(\d+)\s*(?:Ã‘â€šÃÂ¾ÃÂºÃÂµÃÂ½(?:ÃÂ¾ÃÂ²|ÃÂ°)?|token(?:s)?|Ã‘ÂÃÂ»ÃÂ¾ÃÂ²(?:ÃÂ°|ÃÂ¾|ÃÂ¾ÃÂ²)?|words?)/i);
+
+    const explicitParts = Boolean(partsMatch);
+    const explicitTokens = Boolean(tokensMatch);
+
+    const parts = explicitParts ? Math.max(1, parseInt(partsMatch![1], 10)) : 7;
+    let tokensPerPart = explicitTokens ? Math.max(400, parseInt(tokensMatch![1], 10)) : DEFAULT_TOKENS_PER_PART;
+
+    if (!Number.isFinite(tokensPerPart)) {
+      tokensPerPart = DEFAULT_TOKENS_PER_PART;
     }
 
-    // Добавляем релевантные chunks
-    context += selectedChunks
-      .map((chunk, index) => {
-        const sectionLabel = this.getSectionLabel(chunk.metadata.sectionType, chunk.metadata.sectionNumber);
-        return `[Источник ${index + 1}: ${chunk.metadata.filename}, ${sectionLabel}]\n${chunk.content}\n`;
-      })
-      .join('\n---\n');
+    const totalRequestedTokens = parts * tokensPerPart;
 
-    return context;
+    return {
+      parts,
+      tokensPerPart,
+      explicitParts,
+      explicitTokens,
+      totalRequestedTokens
+    };
+  }
+
+  private buildRetrievalPlan(question: string, lengthPreferences: LengthPreferences, manualMaxSources?: number): RetrievalPlan {
+    const highDetail = this.isHighDetailRequest(question) || lengthPreferences.parts >= 5 || lengthPreferences.tokensPerPart >= 1000;
+
+    const chunkLimit = manualMaxSources
+      ? Math.max(40, manualMaxSources)
+      : highDetail
+        ? 280
+        : 160;
+
+    const pageLimit = highDetail ? 40 : 20;
+
+    const estimatedOutput = lengthPreferences.parts * lengthPreferences.tokensPerPart * DEFAULT_PART_BUFFER_RATIO;
+    const availableForContext = MODEL_CONTEXT_TOKEN_LIMIT - estimatedOutput - CONTEXT_SAFETY_MARGIN;
+    const maxContextTokens = Math.max(8000, Math.min(availableForContext, highDetail ? 70000 : 40000));
+
+    return {
+      chunkLimit,
+      pageLimit,
+      maxContextTokens
+    };
+  }
+
+  private buildContext(chunks: EmbeddedChunk[], pages: FullPage[], tokenBudget: number): ContextBuildResult {
+    const uniqueChunksMap = new Map<string, EmbeddedChunk>();
+    chunks.forEach(chunk => {
+      uniqueChunksMap.set(chunk.id, chunk);
+    });
+
+    const chunksList = Array.from(uniqueChunksMap.values());
+    const prioritizedChunks = this.prioritiseChunksByDocument(chunksList);
+
+    const selectedPages: FullPage[] = [];
+    let pageTokensUsed = 0;
+    const maxPageTokens = Math.min(Math.floor(tokenBudget * 0.25), 12000);
+
+    for (const page of pages) {
+      const pageTokens = page.tokens || estimateTokens(page.fullContent);
+      if (pageTokensUsed + pageTokens > maxPageTokens) {
+        continue;
+      }
+      selectedPages.push(page);
+      pageTokensUsed += pageTokens;
+    }
+
+    const remainingBudget = Math.max(tokenBudget - pageTokensUsed, 2000);
+    const selectedChunks: EmbeddedChunk[] = [];
+    let chunkTokensUsed = 0;
+
+    for (const chunk of prioritizedChunks) {
+      const chunkTokens = chunk.metadata.tokens || estimateTokens(chunk.content);
+      if (chunkTokensUsed + chunkTokens > remainingBudget) {
+        if (selectedChunks.length === 0) {
+          selectedChunks.push(chunk);
+        }
+        break;
+      }
+      selectedChunks.push(chunk);
+      chunkTokensUsed += chunkTokens;
+    }
+
+    if (selectedChunks.length === 0 && prioritizedChunks.length > 0) {
+      selectedChunks.push(prioritizedChunks[0]);
+    }
+
+    const text = this.formatContext(selectedPages, selectedChunks);
+
+    return {
+      text,
+      chunks: selectedChunks,
+      pages: selectedPages
+    };
+  }
+
+  private getSystemPrompt(language: 'ru' | 'en'): string {
+    return language === 'ru' ? RU_SYSTEM_PROMPT : EN_SYSTEM_PROMPT;
+  }
+
+  private createPartPrompt(originalQuestion: string, partQuery: PartQuery, context: string, language: 'ru' | 'en'): string {
+    const requirements = language === 'ru'
+      ? [
+          'ÃÅ¡ÃÂ¾ÃÂ½Ã‘â€šÃÂµÃÂºÃ‘ÂÃ‘â€š (ÃÂ¸Ã‘ÂÃÂ¿ÃÂ¾ÃÂ»Ã‘Å’ÃÂ·Ã‘Æ’ÃÂ¹Ã‘â€šÃÂµ Ã‘â€šÃÂ¾ÃÂ»Ã‘Å’ÃÂºÃÂ¾ Ã‘ÂÃ‘â€šÃÂ¸ ÃÂ¼ÃÂ°Ã‘â€šÃÂµÃ‘â‚¬ÃÂ¸ÃÂ°ÃÂ»Ã‘â€¹):',
+          context,
+          'ÃÅ¾Ã‘ÂÃÂ½ÃÂ¾ÃÂ²ÃÂ½ÃÂ¾ÃÂ¹ ÃÂ¸Ã‘ÂÃ‘ÂÃÂ»ÃÂµÃÂ´ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃÂµÃÂ»Ã‘Å’Ã‘ÂÃÂºÃÂ¸ÃÂ¹ ÃÂ²ÃÂ¾ÃÂ¿Ã‘â‚¬ÃÂ¾Ã‘Â:',
+          originalQuestion,
+          'ÃÂ¢ÃÂµÃÂºÃ‘Æ’Ã‘â€°ÃÂ°Ã‘Â Ã‘â€¡ÃÂ°Ã‘ÂÃ‘â€šÃ‘Å’ ÃÂ¸Ã‘ÂÃ‘ÂÃÂ»ÃÂµÃÂ´ÃÂ¾ÃÂ²ÃÂ°ÃÂ½ÃÂ¸Ã‘Â:',
+          `ÃÂÃÂ°ÃÂ·ÃÂ²ÃÂ°ÃÂ½ÃÂ¸ÃÂµ: ${partQuery.plan.title}`,
+          `ÃÂ¦ÃÂµÃÂ»ÃÂµÃÂ²ÃÂ¾ÃÂ¹ ÃÂ¾ÃÂ±Ã‘Å Ã‘â€˜ÃÂ¼: ÃÂ½ÃÂµ ÃÂ¼ÃÂµÃÂ½ÃÂµÃÂµ ${partQuery.plan.tokens} Ã‘â€šÃÂ¾ÃÂºÃÂµÃÂ½ÃÂ¾ÃÂ²`,
+          `ÃÅ¡ÃÂ»Ã‘Å½Ã‘â€¡ÃÂµÃÂ²Ã‘â€¹ÃÂµ Ã‘â€šÃÂµÃÂ¼Ã‘â€¹: ${partQuery.focusKeywords.join(', ')}`,
+          'ÃÂ¢Ã‘â‚¬ÃÂµÃÂ±ÃÂ¾ÃÂ²ÃÂ°ÃÂ½ÃÂ¸Ã‘Â ÃÂº ÃÂ¾Ã‘â€šÃÂ²ÃÂµÃ‘â€šÃ‘Æ’:',
+          '- ÃÅ¸ÃÂ¸Ã‘Ë†ÃÂ¸Ã‘â€šÃÂµ Ã‘â‚¬ÃÂ°ÃÂ·ÃÂ²ÃÂµÃ‘â‚¬ÃÂ½Ã‘Æ’Ã‘â€šÃ‘â€¹ÃÂ¼ÃÂ¸ ÃÂ°ÃÂ±ÃÂ·ÃÂ°Ã‘â€ ÃÂ°ÃÂ¼ÃÂ¸, ÃÂ±ÃÂµÃÂ· Ã‘ÂÃÂ¿ÃÂ¸Ã‘ÂÃÂºÃÂ¾ÃÂ².',
+          '- ÃÅ¸Ã‘â‚¬ÃÂ¸ÃÂ²ÃÂ¾ÃÂ´ÃÂ¸Ã‘â€šÃÂµ Ã‘â€žÃÂ°ÃÂºÃ‘â€šÃ‘â€¹ ÃÂ¸ Ã‘â€žÃÂ¾Ã‘â‚¬ÃÂ¼Ã‘Æ’ÃÂ»ÃÂ¸Ã‘â‚¬ÃÂ¾ÃÂ²ÃÂºÃÂ¸ Ã‘â€šÃÂ¾ÃÂ»Ã‘Å’ÃÂºÃÂ¾ ÃÂ¸ÃÂ· ÃÂºÃÂ¾ÃÂ½Ã‘â€šÃÂµÃÂºÃ‘ÂÃ‘â€šÃÂ°, Ã‘Æ’ÃÂºÃÂ°ÃÂ·Ã‘â€¹ÃÂ²ÃÂ°Ã‘Â ÃÂ¸Ã‘ÂÃ‘â€šÃÂ¾Ã‘â€¡ÃÂ½ÃÂ¸ÃÂºÃÂ¸ ÃÂ² Ã‘â€žÃÂ¾Ã‘â‚¬ÃÂ¼ÃÂ°Ã‘â€šÃÂµ [ÃËœÃÂ¼Ã‘Â Ã‘â€žÃÂ°ÃÂ¹ÃÂ»ÃÂ°, Ã‘â‚¬ÃÂ°ÃÂ·ÃÂ´ÃÂµÃÂ» X], [ÃËœÃÂ¼Ã‘Â Ã‘â€žÃÂ°ÃÂ¹ÃÂ»ÃÂ°, Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ°ÃÂ½ÃÂ¸Ã‘â€ ÃÂ° X].',
+          '- ÃÂ¡ÃÂ²Ã‘ÂÃÂ¶ÃÂ¸Ã‘â€šÃÂµ ÃÂ²Ã‘â€¹ÃÂ²ÃÂ¾ÃÂ´Ã‘â€¹ Ã‘ÂÃ‘â€šÃÂ¾ÃÂ¹ Ã‘â€¡ÃÂ°Ã‘ÂÃ‘â€šÃÂ¸ Ã‘Â ÃÂ¾ÃÂ±Ã‘â€°ÃÂµÃÂ¹ Ã‘â€šÃÂµÃÂ¼ÃÂ¾ÃÂ¹ ÃÂ¸Ã‘ÂÃ‘ÂÃÂ»ÃÂµÃÂ´ÃÂ¾ÃÂ²ÃÂ°ÃÂ½ÃÂ¸Ã‘Â.',
+          '- ÃÂÃÂµ ÃÂ·ÃÂ°ÃÂ²ÃÂµÃ‘â‚¬Ã‘Ë†ÃÂ°ÃÂ¹Ã‘â€šÃÂµ ÃÂ´Ã‘â‚¬Ã‘Æ’ÃÂ³ÃÂ¸ÃÂ¼ÃÂ¸ Ã‘â€¡ÃÂ°Ã‘ÂÃ‘â€šÃ‘ÂÃÂ¼ÃÂ¸; Ã‘ÂÃÂ¾Ã‘ÂÃ‘â‚¬ÃÂµÃÂ´ÃÂ¾Ã‘â€šÃÂ¾Ã‘â€¡Ã‘Å’Ã‘â€šÃÂµÃ‘ÂÃ‘Å’ ÃÂ½ÃÂ° Ã‘â€šÃÂµÃÂºÃ‘Æ’Ã‘â€°ÃÂµÃÂ¼ Ã‘â‚¬ÃÂ°ÃÂ·ÃÂ´ÃÂµÃÂ»ÃÂµ.'
+        ]
+      : [
+          'Context (use only the following materials):',
+          context,
+          'Primary research question:',
+          originalQuestion,
+          'Current section of the report:',
+          `Title: ${partQuery.plan.title}`,
+          `Target length: at least ${partQuery.plan.tokens} tokens`,
+          `Focus areas: ${partQuery.focusKeywords.join(', ')}`,
+          'Response requirements:',
+          '- Write rich paragraphs (no bullet lists unless explicitly requested).',
+          '- Use evidence from the context and cite sources in the format [File name, section X] or [File name, page X].',
+          '- Connect the findings of this section to the overall research aim.',
+          '- Do not summarise future sections; stay within the current part.'
+        ];
+
+    return requirements.join('\n\n');
+  }
+
+  private calculateCost(usage?: { prompt_tokens?: number; completion_tokens?: number }): number {
+    if (!usage) {
+      return 0;
+    }
+    const inputTokens = usage.prompt_tokens || 0;
+    const outputTokens = usage.completion_tokens || 0;
+    return (inputTokens / 1_000_000) * 5 + (outputTokens / 1_000_000) * 15;
   }
 
   private getSectionLabel(sectionType: string, sectionNumber: number): string {
     switch (sectionType) {
       case 'page':
-        return `стр. ${sectionNumber}`;
+        return `page ${sectionNumber}`;
       case 'paragraph':
-        return `параграф ${sectionNumber}`;
+        return `paragraph ${sectionNumber}`;
       case 'sheet':
-        return `лист ${sectionNumber}`;
+        return `sheet ${sectionNumber}`;
       case 'line':
-        return `строка ${sectionNumber}`;
+        return `line ${sectionNumber}`;
       default:
-        return `раздел ${sectionNumber}`;
+        return `section ${sectionNumber}`;
     }
   }
 
-  private createPrompt(question: string, context: string, language: 'ru' | 'en'): string {
-    const isContentCreation = question.includes('части') || question.includes('разделы') ||
-                              question.includes('sections') || question.includes('токенов') ||
-                              question.includes('tokens') || /\d+\s*(части|part|раздел|section)/.test(question);
-
-    const prompts = {
-      ru: `Контекст из загруженных документов:
-${context}
-
-Пользователь спрашивает: ${question}
-
-${isContentCreation ? `
-🚨 ОБЯЗАТЕЛЬНЫЙ СЧЕТЧИК СЛОВ! СТРОГО СЛЕДУЙТЕ!
-
-ДЛЯ КАЖДОЙ ЧАСТИ ПИШИТЕ МИНИМУМ 800 СЛОВ!
-
-ФОРМАТ ОТВЕТА:
-
-**ЧАСТЬ 1: [Название]**
-
-Эта часть должна содержать развернутый анализ первого аспекта темы. Начинаю с детального рассмотрения основных принципов и концепций, которые лежат в основе данного раздела. Важно подчеркнуть, что каждый элемент требует глубокого понимания и всестороннего изучения. Рассматривая данную тему, необходимо обратить внимание на множество факторов, которые влияют на конечный результат. Детальный анализ показывает, что существует прямая связь между различными компонентами системы. Углубляясь в изучение вопроса, становится очевидным, что необходимо учитывать не только основные аспекты, но и второстепенные элементы. Практический опыт демонстрирует важность комплексного подхода к решению поставленных задач. Исследования в данной области показывают, что эффективность достигается через систематическое применение проверенных методик. Анализируя имеющуюся информацию, можно выделить ключевые моменты, которые определяют успешность реализации проекта.
-
-[ПРОДОЛЖАЙТЕ ПИСАТЬ ПОДОБНЫМ ОБРАЗОМ ДО 800+ СЛОВ]
-
-**ЧАСТЬ 2: [Название]**
-
-[СНОВА 800+ СЛОВ В ТАКОМ ЖЕ РАЗВЕРНУТОМ СТИЛЕ]
-
-ТРЕБОВАНИЕ: КАЖДАЯ ЧАСТЬ = МИНИМУМ 800 СЛОВ!
-` : ''}
-
-Проанализируйте предоставленный контекст и ответьте на вопрос. Вы можете читать и анализировать все документы из контекста выше.
-
-Обязательно укажите источники в формате [Название файла, стр./параграф/лист X] для каждого утверждения.`,
-      en: `Context from uploaded documents:
-${context}
-
-User asks: ${question}
-
-${isContentCreation ? `
-🚨 MANDATORY WORD COUNT! STRICTLY FOLLOW!
-
-WRITE MINIMUM 800 WORDS FOR EACH PART!
-
-RESPONSE FORMAT:
-
-**PART 1: [Title]**
-
-This part must contain a comprehensive analysis of the first aspect of the topic. I begin with a detailed examination of the fundamental principles and concepts that form the foundation of this section. It is important to emphasize that each element requires deep understanding and thorough study. When examining this topic, it is necessary to pay attention to the numerous factors that influence the final outcome. Detailed analysis shows that there is a direct connection between various system components. Delving deeper into the study of the question, it becomes obvious that it is necessary to consider not only the main aspects, but also secondary elements. Practical experience demonstrates the importance of a comprehensive approach to solving the tasks at hand. Research in this field shows that effectiveness is achieved through systematic application of proven methodologies. Analyzing the available information, key points can be identified that determine the success of project implementation.
-
-[CONTINUE WRITING IN THIS MANNER UNTIL 800+ WORDS]
-
-**PART 2: [Title]**
-
-[AGAIN 800+ WORDS IN THE SAME COMPREHENSIVE STYLE]
-
-REQUIREMENT: EACH PART = MINIMUM 800 WORDS!
-` : ''}
-
-Analyze the provided context and answer the question. You can read and analyze all documents from the context above.
-
-Make sure to cite sources in format [File name, page/paragraph/sheet X] for each statement.`
-    };
-
-    return prompts[language];
+  private isHighDetailRequest(question: string): boolean {
+    const lower = question.toLowerCase();
+    return DETAIL_KEYWORDS.some(keyword => lower.includes(keyword));
   }
 
-  getEmbeddingsManager(): EmbeddingsManager {
-    return this.embeddings;
+  private prioritiseChunksByDocument(chunks: EmbeddedChunk[]): EmbeddedChunk[] {
+    const byDocument = new Map<string, EmbeddedChunk[]>();
+    chunks.forEach(chunk => {
+      const list = byDocument.get(chunk.metadata.filename) || [];
+      list.push(chunk);
+      byDocument.set(chunk.metadata.filename, list);
+    });
+
+    const primary: EmbeddedChunk[] = [];
+    const secondary: EmbeddedChunk[] = [];
+
+    for (const [, list] of byDocument.entries()) {
+      list.sort((a, b) => (b.metadata.tokens || estimateTokens(b.content)) - (a.metadata.tokens || estimateTokens(a.content)));
+      if (list.length > 0) {
+        primary.push(list[0]);
+        secondary.push(...list.slice(1));
+      }
+    }
+
+    const others = chunks.filter(chunk => !primary.includes(chunk) && !secondary.includes(chunk));
+
+    return [...primary, ...secondary, ...others];
+  }
+
+  private async delayIfNeeded(): Promise<void> {\n    const delayMs = 2000;\n    await new Promise(resolve => setTimeout(resolve, delayMs));\n  }\n\n  private countTokens(text: string): number {
+    return estimateTokens(text);
+  }
+
+  private estimatePromptTokens(systemPrompt: string, userPrompt: string): number {
+    return this.countTokens(systemPrompt) + this.countTokens(userPrompt);
+  }
+
+  private formatContext(pages: FullPage[], chunks: EmbeddedChunk[]): string {
+    const contextSections: string[] = [];
+
+    if (pages.length > 0) {
+      contextSections.push('=== Full pages (verbatim) ===');
+      pages.forEach((page) => {
+        contextSections.push(`Page ${page.pageNumber} from ${page.filename}:`);
+        contextSections.push(page.fullContent.trim());
+        contextSections.push('');
+      });
+    }
+
+    if (chunks.length > 0) {
+      contextSections.push('=== Key fragments ===');
+      chunks.forEach((chunk, index) => {
+        const sectionLabel = this.getSectionLabel(chunk.metadata.sectionType, chunk.metadata.sectionNumber);
+        contextSections.push(`Fragment ${index + 1} from ${chunk.metadata.filename}, ${sectionLabel}:`);
+        contextSections.push(chunk.content.trim());
+        contextSections.push('');
+      });
+    }
+
+    return contextSections.join('\n').trim();
   }
 }

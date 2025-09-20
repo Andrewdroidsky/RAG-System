@@ -153,23 +153,70 @@ export class EmbeddingsManager {
     return chunks.filter(chunk => chunk.length > 10);
   }
 
-  async searchSimilar(query: string, topK: number = 50): Promise<EmbeddedChunk[]> {
+  async searchSimilar(
+    query: string,
+    optionsOrTopK?: number | { topK?: number; minScore?: number; ensurePerDocument?: boolean }
+  ): Promise<EmbeddedChunk[]> {
     const queryEmbedding = await this.createEmbedding(query);
     const documents = await this.loadFromStorage();
 
     const allChunks = documents.flatMap(doc => doc.chunks);
 
-    // Calculate cosine similarity
-    const similarities = allChunks.map(chunk => ({
+    if (allChunks.length === 0) {
+      return [];
+    }
+
+    type ScoredChunk = { chunk: EmbeddedChunk; similarity: number };
+
+    const options = typeof optionsOrTopK === 'number'
+      ? { topK: optionsOrTopK }
+      : optionsOrTopK ?? {};
+
+    const topK = options.topK ?? 50;
+    const ensurePerDocument = options.ensurePerDocument ?? false;
+    const minScore = options.minScore ?? -Infinity;
+
+    const scored: ScoredChunk[] = allChunks.map(chunk => ({
       chunk,
       similarity: this.cosineSimilarity(queryEmbedding, chunk.embedding)
     }));
 
-    // Sort by similarity and return top K
-    return similarities
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, topK)
-      .map(item => item.chunk);
+    const sorted: ScoredChunk[] = scored
+      .filter(item => item.similarity >= minScore)
+      .sort((a, b) => b.similarity - a.similarity);
+
+    if (sorted.length === 0) {
+      return [];
+    }
+
+    let ordered: EmbeddedChunk[];
+
+    if (ensurePerDocument) {
+      const primary: ScoredChunk[] = [];
+      const secondary: ScoredChunk[] = [];
+      const seenDocs = new Set<string>();
+
+      for (const item of sorted) {
+        const docId = item.chunk.metadata.filename;
+        if (!seenDocs.has(docId)) {
+          primary.push(item);
+          seenDocs.add(docId);
+        } else {
+          secondary.push(item);
+        }
+      }
+
+      ordered = [...primary, ...secondary].map(item => item.chunk);
+    } else {
+      ordered = sorted.map(item => item.chunk);
+    }
+
+    if (Number.isFinite(topK)) {
+      const limit = Math.max(1, Number(topK));
+      return ordered.slice(0, limit);
+    }
+
+    return ordered;
   }
 
   // НОВОЕ: Поиск релевантных полных страниц
