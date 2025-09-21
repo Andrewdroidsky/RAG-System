@@ -11,6 +11,14 @@ export interface EmbeddedChunk {
     sectionNumber: number;
     sectionType: 'page' | 'paragraph' | 'sheet' | 'line';
     tokens: number;
+    // Hierarchical Structure Preservation
+    hierarchy: {
+      documentTitle?: string;
+      parentSection?: string;
+      belongsTo: string[]; // Chain of parent sections
+      nearbyHeadings: string[]; // Headings found nearby
+      structuralContext: string; // Context about position in document
+    };
   };
 }
 
@@ -72,7 +80,13 @@ export class EmbeddingsManager {
                 filename: item.doc.filename,
                 sectionNumber: item.section.sectionNumber,
                 sectionType: item.section.sectionType,
-                tokens: Math.ceil(item.chunk.length / 4)
+                tokens: Math.ceil(item.chunk.length / 4),
+                // Временно отключаем иерархию для тестирования
+                hierarchy: {
+                  belongsTo: [],
+                  nearbyHeadings: [],
+                  structuralContext: ""
+                }
               }
             }
           };
@@ -219,6 +233,49 @@ export class EmbeddingsManager {
     return ordered;
   }
 
+  // НОВОЕ: Поиск chunks только в релевантных страницах
+  async searchSimilarInPages(query: string, relevantPages: FullPage[], options?: { topK?: number; minScore?: number }): Promise<EmbeddedChunk[]> {
+    const queryEmbedding = await this.createEmbedding(query);
+    const documents = await this.loadFromStorage();
+
+    // Фильтруем chunks только по релевантным страницам
+    const relevantChunks: EmbeddedChunk[] = [];
+
+    for (const doc of documents) {
+      for (const chunk of doc.chunks) {
+        // Проверяем, относится ли chunk к одной из релевантных страниц
+        const isRelevant = relevantPages.some(page =>
+          page.filename === chunk.metadata.filename &&
+          page.pageNumber === chunk.metadata.sectionNumber
+        );
+
+        if (isRelevant) {
+          relevantChunks.push(chunk);
+        }
+      }
+    }
+
+    if (relevantChunks.length === 0) {
+      return [];
+    }
+
+    // Рассчитываем похожесть и сортируем
+    const scored = relevantChunks.map(chunk => ({
+      chunk,
+      similarity: this.cosineSimilarity(queryEmbedding, chunk.embedding)
+    }));
+
+    const topK = options?.topK ?? 50;
+    const minScore = options?.minScore ?? -Infinity;
+
+    const filtered = scored
+      .filter(item => item.similarity >= minScore)
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, topK);
+
+    return filtered.map(item => item.chunk);
+  }
+
   // НОВОЕ: Поиск релевантных полных страниц
   async findRelevantPages(query: string, topK: number = 5): Promise<FullPage[]> {
     const queryEmbedding = await this.createEmbedding(query);
@@ -320,5 +377,138 @@ export class EmbeddingsManager {
       const filtered = documents.filter(doc => doc.filename !== filename);
       localStorage.setItem('rag-embeddings', JSON.stringify(filtered));
     }
+  }
+
+  private extractHierarchy(doc: ProcessedDocument, section: ProcessedSection, chunk: string): EmbeddedChunk['metadata']['hierarchy'] {
+    // Extract headings and structure from content
+    const nearbyHeadings = this.findNearbyHeadings(chunk, section.content);
+    const belongsTo = this.buildBelongsToChain(doc, section);
+    const structuralContext = this.determineStructuralContext(doc, section);
+
+    return {
+      documentTitle: doc.filename.replace(/\.[^/.]+$/, ""), // Remove extension
+      parentSection: this.findParentSection(doc, section),
+      belongsTo,
+      nearbyHeadings,
+      structuralContext
+    };
+  }
+
+  private findNearbyHeadings(chunk: string, fullSectionContent: string): string[] {
+    const headings: string[] = [];
+    const chunkPos = fullSectionContent.indexOf(chunk);
+
+    if (chunkPos === -1) return headings;
+
+    // Look for headings before and after the chunk
+    const contextBefore = fullSectionContent.substring(Math.max(0, chunkPos - 500), chunkPos);
+    const contextAfter = fullSectionContent.substring(chunkPos + chunk.length, chunkPos + chunk.length + 500);
+
+    // Simple regex for common heading patterns
+    const headingRegex = /(?:^|\n)([A-Z][A-Za-z0-9\s]{3,50})(?:\n|$)/g;
+
+    let match;
+    while ((match = headingRegex.exec(contextBefore)) !== null) {
+      const heading = match[1].trim();
+      if (heading.length > 3 && heading.length < 100) {
+        headings.unshift(heading); // Add to beginning for chronological order
+      }
+    }
+
+    while ((match = headingRegex.exec(contextAfter)) !== null) {
+      const heading = match[1].trim();
+      if (heading.length > 3 && heading.length < 100) {
+        headings.push(heading);
+      }
+    }
+
+    return headings.slice(0, 5); // Limit to 5 most relevant headings
+  }
+
+  private buildBelongsToChain(doc: ProcessedDocument, section: ProcessedSection): string[] {
+    const chain: string[] = [];
+
+    // Add document-level context
+    chain.push(doc.filename);
+
+    // Add section context based on section type and number
+    if (section.sectionType === 'page') {
+      chain.push(`Page ${section.sectionNumber}`);
+    } else if (section.sectionType === 'paragraph') {
+      chain.push(`Paragraph ${section.sectionNumber}`);
+    } else {
+      chain.push(`Section ${section.sectionNumber} (${section.sectionType})`);
+    }
+
+    // Try to extract logical sections from content
+    const logicalSections = this.extractLogicalSections(section.content);
+    chain.push(...logicalSections);
+
+    return chain;
+  }
+
+  private extractLogicalSections(content: string): string[] {
+    const sections: string[] = [];
+
+    // Look for common section indicators
+    const sectionIndicators = [
+      /(?:^|\n)(Introduction|Введение)/gi,
+      /(?:^|\n)(Background|Предпосылки)/gi,
+      /(?:^|\n)(Methodology|Методология)/gi,
+      /(?:^|\n)(Results|Результаты)/gi,
+      /(?:^|\n)(Discussion|Обсуждение)/gi,
+      /(?:^|\n)(Conclusion|Заключение)/gi,
+      /(?:^|\n)(Regulatory|Нормативная база)/gi,
+      /(?:^|\n)(Tax|Налоги)/gi,
+      /(?:^|\n)(Logistics|Логистика)/gi,
+      /(?:^|\n)(Risk|Риски)/gi
+    ];
+
+    sectionIndicators.forEach(regex => {
+      const matches = content.match(regex);
+      if (matches) {
+        matches.forEach(match => {
+          const cleaned = match.replace(/^[\n\r]+/, '').trim();
+          if (cleaned && !sections.includes(cleaned)) {
+            sections.push(cleaned);
+          }
+        });
+      }
+    });
+
+    return sections.slice(0, 3); // Limit to 3 most relevant logical sections
+  }
+
+  private findParentSection(doc: ProcessedDocument, section: ProcessedSection): string | undefined {
+    // Find the previous section that might be a parent (like a heading)
+    const currentIndex = doc.sections.findIndex(s =>
+      s.sectionNumber === section.sectionNumber && s.sectionType === section.sectionType
+    );
+
+    if (currentIndex > 0) {
+      const previousSection = doc.sections[currentIndex - 1];
+      // If previous section is shorter and might be a heading
+      if (previousSection.content.length < 200 && previousSection.content.trim().length > 0) {
+        return previousSection.content.trim().substring(0, 100);
+      }
+    }
+
+    return undefined;
+  }
+
+  private determineStructuralContext(doc: ProcessedDocument, section: ProcessedSection): string {
+    const totalSections = doc.sections.length;
+    const currentIndex = doc.sections.findIndex(s =>
+      s.sectionNumber === section.sectionNumber && s.sectionType === section.sectionType
+    );
+
+    let position = "middle";
+    if (currentIndex < totalSections * 0.25) {
+      position = "beginning";
+    } else if (currentIndex > totalSections * 0.75) {
+      position = "end";
+    }
+
+    return `${position} of document (${currentIndex + 1}/${totalSections} sections)`;
   }
 }

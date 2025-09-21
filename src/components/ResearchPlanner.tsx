@@ -32,7 +32,7 @@ function detectExplicitParts(request: string): string[] {
 
 export function planReport(request: string, length: LengthRequest): ReportPlan {
   const explicitParts = detectExplicitParts(request);
-  const parts = length.parts ?? explicitParts.length || 7;
+  const parts = length.parts ?? (explicitParts.length || 7);
 
   const baseTopics: PartPlan[] = [];
 

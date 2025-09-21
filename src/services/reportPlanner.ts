@@ -3,7 +3,43 @@ import { LengthRequest, PartPlan, ReportPlan } from '@/types/research';
 const INTRO_KEYWORDS = ['introduction', 'введение', 'overview'];
 const CONCLUSION_KEYWORDS = ['conclusion', 'summary', 'вывод', 'заключение', 'recommendations'];
 
+function detectContentsStructure(request: string): string[] {
+  const lines = request.split(/\r?\n/).map(line => line.trim());
+
+  // Ищем раздел Contents или similar
+  const contentsIndex = lines.findIndex(line =>
+    /^(contents?|structure|outline)$/i.test(line.trim())
+  );
+
+  if (contentsIndex === -1) return [];
+
+  const contentsLines = lines.slice(contentsIndex + 1);
+  const parts: string[] = [];
+
+  for (const line of contentsLines) {
+    // Ищем строки типа "Part 1: Title" или "1.1 Title"
+    const partMatch = line.match(/^Part\s+(\d+):\s*(.+)$/i);
+    if (partMatch) {
+      parts.push(partMatch[2].trim());
+      continue;
+    }
+
+    // Если встретили пустую строку или новый раздел - прекращаем
+    if (!line || /^[A-Z][a-z].*:/.test(line)) {
+      break;
+    }
+  }
+
+  return parts;
+}
+
 function detectExplicitParts(request: string): string[] {
+  // Сначала пробуем найти структуру в Contents
+  const contentsParts = detectContentsStructure(request);
+  if (contentsParts.length >= 3) {
+    return contentsParts;
+  }
+
   const lines = request
     .split(/\r?\n/)
     .map(line => line.trim())
@@ -40,7 +76,7 @@ function normalizeKeywords(title: string): string[] {
 
 export function planReport(request: string, length: LengthRequest): ReportPlan {
   const explicitParts = detectExplicitParts(request);
-  const requestedParts = length.parts ?? explicitParts.length || 7;
+  const requestedParts = length.parts ?? (explicitParts.length || 7);
 
   const baseTopics: PartPlan[] = [];
 

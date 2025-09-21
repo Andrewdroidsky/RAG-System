@@ -48,22 +48,31 @@ const MODEL_OUTPUT_TOKEN_LIMIT = 16000;
 const MODEL_CONTEXT_TOKEN_LIMIT = 120000;
 const CONTEXT_SAFETY_MARGIN = 2000;
 const MIN_OUTPUT_TOKENS = 512;
-const DEFAULT_TOKENS_PER_PART = 900;
-const RATE_LIMIT_TOKENS_PER_REQUEST = 30000;
-const RATE_LIMIT_SAFETY_MARGIN = 2500;
+const DEFAULT_TOKENS_PER_PART = 1200;
+const RATE_LIMIT_TOKENS_PER_REQUEST = 15000;  // Снижаем лимит вдвое
+const RATE_LIMIT_SAFETY_MARGIN = 3000;
+
+// Адаптивные параметры поиска
+const ADAPTIVE_SEARCH_CONFIG = {
+  minPages: 8,            // Минимум страниц для поиска
+  maxPages: 15,           // Максимум страниц для поиска (безопасно для 30k TPM)
+  avgTokensPerPage: 650,  // Средний размер страницы в токенах
+  avgTokensPerChunk: 250, // Средний размер chunk в токенах
+  chunksPerPage: 3,       // Среднее количество chunks на страницу
+};
 const DEFAULT_PART_BUFFER_RATIO = 1.25;
 
 const DETAIL_KEYWORDS = [
-  'ÃÂ¸Ã‘ÂÃ‘ÂÃÂ»ÃÂµÃÂ´',
+  'исследуй',
   'analysis',
   'review',
-  'ÃÂ´ÃÂ¾ÃÂºÃÂ»ÃÂ°ÃÂ´',
+  'доклад',
   'research',
-  'ÃÂ¾ÃÂ±ÃÂ·ÃÂ¾Ã‘â‚¬',
+  'обзор',
   'strategy',
-  'Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ°Ã‘â€šÃÂµÃÂ³',
+  'подробно',
   'comprehensive',
-  'ÃÂ¿ÃÂ¾ÃÂ´Ã‘â‚¬ÃÂ¾ÃÂ±',
+  'проанализируй',
   'deep dive'
 ];
 
@@ -71,26 +80,35 @@ const DIAGNOSTIC_KEYWORDS = [
   'list files',
   'list documents',
   'show files',
-  'ÃÂºÃÂ°ÃÂºÃÂ¸ÃÂµ Ã‘â€žÃÂ°ÃÂ¹ÃÂ»Ã‘â€¹',
-  'Ã‘ÂÃÂºÃÂ¾ÃÂ»Ã‘Å’ÃÂºÃÂ¾ Ã‘â€žÃÂ°ÃÂ¹ÃÂ»ÃÂ¾ÃÂ²',
-  'ÃÂºÃÂ°ÃÂºÃÂ¸ÃÂµ ÃÂ´ÃÂ¾ÃÂºÃ‘Æ’ÃÂ¼ÃÂµÃÂ½Ã‘â€šÃ‘â€¹',
+  'какие файлы',
+  'сколько файлов',
+  'какие документы',
   'document summary',
   'document status'
 ];
 
 const RU_SYSTEM_PROMPT = [
-  'Ãâ€™Ã‘â€¹ Ã¢â‚¬â€ Ã‘ÂÃÂ¸Ã‘ÂÃ‘â€šÃÂµÃÂ¼ÃÂ° ÃÂ°ÃÂ½ÃÂ°ÃÂ»ÃÂ¸ÃÂ·ÃÂ° ÃÂ´ÃÂ¾ÃÂºÃ‘Æ’ÃÂ¼ÃÂµÃÂ½Ã‘â€šÃÂ¾ÃÂ² Ã‘Â ÃÂ´ÃÂ¾Ã‘ÂÃ‘â€šÃ‘Æ’ÃÂ¿ÃÂ¾ÃÂ¼ ÃÂº ÃÂ¸ÃÂ·ÃÂ²ÃÂ»ÃÂµÃ‘â€¡Ã‘â€˜ÃÂ½ÃÂ½Ã‘â€¹ÃÂ¼ Ã‘â€žÃ‘â‚¬ÃÂ°ÃÂ³ÃÂ¼ÃÂµÃÂ½Ã‘â€šÃÂ°ÃÂ¼ ÃÂ¸ Ã‘â€ ÃÂµÃÂ»Ã‘â€¹ÃÂ¼ Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ°ÃÂ½ÃÂ¸Ã‘â€ ÃÂ°ÃÂ¼.',
-  'ÃÅ¾Ã‘â€šÃÂ²ÃÂµÃ‘â€¡ÃÂ°ÃÂ¹Ã‘â€šÃÂµ Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ¾ÃÂ³ÃÂ¾ ÃÂ½ÃÂ° ÃÂ¾Ã‘ÂÃÂ½ÃÂ¾ÃÂ²ÃÂµ ÃÂ¿ÃÂµÃ‘â‚¬ÃÂµÃÂ´ÃÂ°ÃÂ½ÃÂ½ÃÂ¾ÃÂ³ÃÂ¾ ÃÂºÃÂ¾ÃÂ½Ã‘â€šÃÂµÃÂºÃ‘ÂÃ‘â€šÃÂ°. Ãâ€¢Ã‘ÂÃÂ»ÃÂ¸ ÃÂ´ÃÂ°ÃÂ½ÃÂ½Ã‘â€¹Ã‘â€¦ ÃÂ½ÃÂµÃÂ´ÃÂ¾Ã‘ÂÃ‘â€šÃÂ°Ã‘â€šÃÂ¾Ã‘â€¡ÃÂ½ÃÂ¾, ÃÂ¿Ã‘â‚¬Ã‘ÂÃÂ¼ÃÂ¾ Ã‘Æ’ÃÂºÃÂ°ÃÂ¶ÃÂ¸Ã‘â€šÃÂµ Ã‘ÂÃ‘â€šÃÂ¾.',
-  'ÃÂÃÂµ ÃÂ¿Ã‘â‚¬ÃÂ¸ÃÂ´Ã‘Æ’ÃÂ¼Ã‘â€¹ÃÂ²ÃÂ°ÃÂ¹Ã‘â€šÃÂµ Ã‘â€žÃÂ°ÃÂºÃ‘â€šÃ‘â€¹ ÃÂ¸ ÃÂ½ÃÂµ Ã‘â€ ÃÂ¸Ã‘â€šÃÂ¸Ã‘â‚¬Ã‘Æ’ÃÂ¹Ã‘â€šÃÂµ ÃÂ½ÃÂµÃ‘ÂÃ‘Æ’Ã‘â€°ÃÂµÃ‘ÂÃ‘â€šÃÂ²Ã‘Æ’Ã‘Å½Ã‘â€°ÃÂ¸ÃÂµ ÃÂ¸Ã‘ÂÃ‘â€šÃÂ¾Ã‘â€¡ÃÂ½ÃÂ¸ÃÂºÃÂ¸.',
-  'Ãâ€™Ã‘ÂÃÂµÃÂ³ÃÂ´ÃÂ° ÃÂ¿Ã‘â‚¬ÃÂ¸ÃÂ²ÃÂ¾ÃÂ´ÃÂ¸Ã‘â€šÃÂµ Ã‘ÂÃ‘ÂÃ‘â€¹ÃÂ»ÃÂºÃÂ¸ ÃÂ½ÃÂ° ÃÂ¸Ã‘ÂÃ‘â€šÃÂ¾Ã‘â€¡ÃÂ½ÃÂ¸ÃÂºÃÂ¸ ÃÂ² Ã‘â€žÃÂ¾Ã‘â‚¬ÃÂ¼ÃÂ°Ã‘â€šÃÂµ [ÃËœÃÂ¼Ã‘Â Ã‘â€žÃÂ°ÃÂ¹ÃÂ»ÃÂ°, Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ°ÃÂ½ÃÂ¸Ã‘â€ ÃÂ° X] ÃÂ´ÃÂ»Ã‘Â ÃÂ¿ÃÂ¾ÃÂ»ÃÂ½Ã‘â€¹Ã‘â€¦ Ã‘ÂÃ‘â€šÃ‘â‚¬ÃÂ°ÃÂ½ÃÂ¸Ã‘â€  ÃÂ¸ [ÃËœÃÂ¼Ã‘Â Ã‘â€žÃÂ°ÃÂ¹ÃÂ»ÃÂ°, Ã‘â‚¬ÃÂ°ÃÂ·ÃÂ´ÃÂµÃÂ» X] ÃÂ´ÃÂ»Ã‘Â Ã‘â€žÃ‘â‚¬ÃÂ°ÃÂ³ÃÂ¼ÃÂµÃÂ½Ã‘â€šÃÂ¾ÃÂ².',
-  'ÃÅ¸ÃÂ¸Ã‘Ë†ÃÂ¸Ã‘â€šÃÂµ ÃÂ¾Ã‘â€šÃÂ²ÃÂµÃ‘â€šÃ‘â€¹ ÃÂ¸Ã‘ÂÃÂºÃÂ»Ã‘Å½Ã‘â€¡ÃÂ¸Ã‘â€šÃÂµÃÂ»Ã‘Å’ÃÂ½ÃÂ¾ ÃÂ½ÃÂ° Ã‘â‚¬Ã‘Æ’Ã‘ÂÃ‘ÂÃÂºÃÂ¾ÃÂ¼ Ã‘ÂÃÂ·Ã‘â€¹ÃÂºÃÂµ.'
+  'Вы — помощник по анализу документов с доступом к извлеченным фрагментам и полным страницам.',
+  'КРИТИЧЕСКИ ВАЖНО: Пишите ТОЛЬКО про тему текущей части. НЕ упоминайте другие темы или части.',
+  'НЕ создавайте собственные заголовки - используйте только заданный заголовок части.',
+  'НЕ пишите содержимое, которое относится к другим частям отчета.',
+  'Отвечайте строго в рамках предоставленного контекста и ТОЛЬКО в рамках темы текущей части.',
+  'Если в контексте нет информации именно по теме данной части - так и укажите.',
+  'Не выдумывайте факты и не цитируйте материалы, не относящиеся к контексту',
+  'Всегда указывайте источники в формате [Имя файла, страница X] для полных страниц и [Имя файла, раздел X] для фрагментов.',
+  'Отвечайте только на русском языке.'
 ].join('\n');
 
 const EN_SYSTEM_PROMPT = [
   'You are a document-analysis assistant with access to retrieved fragments and full pages.',
-  'Answer strictly using the provided context. If information is missing, say so explicitly.',
+  'CRITICAL: Write ONLY about the current part\'s topic. DO NOT mention other topics or parts.',
+  'DO NOT create your own headings - use only the provided part heading.',
+  'DO NOT write content that belongs to other parts of the report.',
+  'Answer strictly using the provided context and ONLY within the scope of the current part\'s topic.',
+  'If the context lacks information specifically about this part\'s topic - state this explicitly.',
   'Do not invent facts and do not cite materials that are not in the context.',
   'Always cite sources in the format [File name, page X] for full pages and [File name, section X] for fragments.',
+  'Stay strictly within the boundaries of the assigned part topic.',
   'Respond in English only.'
 ].join('\n');
 
@@ -110,6 +128,14 @@ function getTokenEncoder(): Tiktoken | null {
 function isDiagnosticsRequest(request: string): boolean {
   const lower = request.toLowerCase();
   return DIAGNOSTIC_KEYWORDS.some(keyword => lower.includes(keyword));
+}
+
+function parseSpecificPartRequest(request: string): { isSpecific: boolean; requestedParts: number[] } {
+  // Убираем весь этот сложный парсер - он все ломает
+  return {
+    isSpecific: false,
+    requestedParts: []
+  };
 }
 
 function mergeChunks(primary: EmbeddedChunk[], secondary: EmbeddedChunk[]): EmbeddedChunk[] {
@@ -197,10 +223,13 @@ export class RAGQueryEngine {
       };
     }
 
+    // Просто создаем обычный план без всякого парсинга
     const lengthPreferences = this.extractLengthPreferences(trimmedQuestion);
     const reportPlan = this.buildReportPlan(trimmedQuestion, lengthPreferences);
+    const targetParts = reportPlan.parts;
 
-    if (lengthPreferences.totalRequestedTokens > MODEL_OUTPUT_TOKEN_LIMIT * reportPlan.parts.length) {
+    const totalRequestedTokens = targetParts.reduce((sum, part) => sum + (part.tokens || DEFAULT_TOKENS_PER_PART), 0);
+    if (totalRequestedTokens > MODEL_OUTPUT_TOKEN_LIMIT * targetParts.length) {
       const message = language === 'ru'
         ? 'Ãâ€”ÃÂ°ÃÂ¿Ã‘â‚¬ÃÂ¾Ã‘Ë†ÃÂµÃÂ½ÃÂ½Ã‘â€¹ÃÂ¹ ÃÂ¾ÃÂ±Ã‘Å Ã‘â€˜ÃÂ¼ ÃÂ¿Ã‘â‚¬ÃÂµÃÂ²Ã‘â€¹Ã‘Ë†ÃÂ°ÃÂµÃ‘â€š ÃÂ¼ÃÂ°ÃÂºÃ‘ÂÃÂ¸ÃÂ¼ÃÂ°ÃÂ»Ã‘Å’ÃÂ½ÃÂ¾ ÃÂ¿ÃÂ¾ÃÂ´ÃÂ´ÃÂµÃ‘â‚¬ÃÂ¶ÃÂ¸ÃÂ²ÃÂ°ÃÂµÃÂ¼Ã‘â€¹ÃÂ¹ ÃÂ´ÃÂ°ÃÂ¶ÃÂµ ÃÂ¿Ã‘â‚¬ÃÂ¸ Ã‘â‚¬ÃÂ°ÃÂ·ÃÂ±ÃÂ¸ÃÂµÃÂ½ÃÂ¸ÃÂ¸ ÃÂ¿ÃÂ¾ Ã‘â€¡ÃÂ°Ã‘ÂÃ‘â€šÃ‘ÂÃÂ¼. ÃÂ£ÃÂ¼ÃÂµÃÂ½Ã‘Å’Ã‘Ë†ÃÂ¸Ã‘â€šÃÂµ Ã‘â€šÃ‘â‚¬ÃÂµÃÂ±ÃÂ¾ÃÂ²ÃÂ°ÃÂ½ÃÂ¸Ã‘Â.'
         : 'The requested length exceeds what can be generated even when split into parts. Please reduce the requirements.';
@@ -212,14 +241,15 @@ export class RAGQueryEngine {
       };
     }
 
-    const retrievalPlan = this.buildRetrievalPlan(trimmedQuestion, lengthPreferences, maxSources);
+    const retrievalPlan = await this.buildRetrievalPlan(trimmedQuestion, targetParts, maxSources);
     const basePages = await this.embeddings.findRelevantPages(trimmedQuestion, retrievalPlan.pageLimit);
-    const baseChunks = await this.embeddings.searchSimilar(trimmedQuestion, {
-      topK: retrievalPlan.chunkLimit,
-      ensurePerDocument: true
+
+    // Оптимизированный поиск chunks только в релевантных страницах
+    const baseChunks = await this.embeddings.searchSimilarInPages(trimmedQuestion, basePages, {
+      topK: retrievalPlan.chunkLimit
     });
 
-    const partQueries = createPartQueries(trimmedQuestion, reportPlan.parts);
+    const partQueries = createPartQueries(trimmedQuestion, targetParts);
     const systemPrompt = this.getSystemPrompt(language);
 
     const partResults: PartGenerationResult[] = [];
@@ -268,6 +298,7 @@ export class RAGQueryEngine {
     return this.embeddings;
   }
 
+
   private async generatePart(
     originalQuestion: string,
     partQuery: PartQuery,
@@ -278,15 +309,20 @@ export class RAGQueryEngine {
     language: 'ru' | 'en'
   ): Promise<PartGenerationResult> {
     const searchQuery = composePartSearchQuery(originalQuestion, partQuery);
-    const additionalChunks = await this.embeddings.searchSimilar(searchQuery, {
-      topK: Math.max(40, Math.floor(retrievalPlan.chunkLimit / 2)),
-      ensurePerDocument: true
+
+    // Специфический поиск для каждой части
+    const partSpecificChunks = await this.embeddings.searchSimilarInPages(searchQuery, basePages, {
+      topK: Math.max(60, Math.floor(retrievalPlan.chunkLimit * 1.5))
     });
 
-    const mergedChunks = mergeChunks(baseChunks, additionalChunks);
-    const rankedChunks = scoreChunksForPart(partQuery.plan, mergedChunks).slice(0, retrievalPlan.chunkLimit);
-    const relatedPages = filterPagesForChunks(basePages, rankedChunks);
-    const context = this.buildContext(rankedChunks, relatedPages, retrievalPlan.maxContextTokens);
+    // Объединяем chunks и делаем специфический скоринг для части
+    const allChunks = mergeChunks(baseChunks, partSpecificChunks);
+    const rankedChunks = scoreChunksForPart(partQuery.plan, allChunks);
+
+    // Берем только топ chunks для этой части с более строгим ограничением
+    const selectedChunks = rankedChunks.slice(0, Math.min(retrievalPlan.chunkLimit, 35)); // Возвращаем больше chunks теперь что оптимизировали prompt
+    const relatedPages = filterPagesForChunks(basePages, selectedChunks);
+    const context = this.buildContext(selectedChunks, relatedPages, retrievalPlan.maxContextTokens);
 
     if (!context.text.trim()) {
       const fallback = language === 'ru'
@@ -340,7 +376,7 @@ export class RAGQueryEngine {
     let contextText = this.formatContext(contextPages, contextChunks);
     let userPrompt = this.createPartPrompt(originalQuestion, partQuery, contextText, language);
 
-    const allowedRequestTokens = RATE_LIMIT_TOKENS_PER_REQUEST - RATE_LIMIT_SAFETY_MARGIN;
+    const allowedRequestTokens = 12000; // Увеличиваем теперь что оптимизировали prompt
     let promptTokens = this.estimatePromptTokens(systemPrompt, userPrompt);
 
     while (promptTokens + maxTokens > allowedRequestTokens && (contextChunks.length > 1 || contextPages.length > 0)) {
@@ -355,6 +391,7 @@ export class RAGQueryEngine {
       userPrompt = this.createPartPrompt(originalQuestion, partQuery, contextText, language);
       promptTokens = this.estimatePromptTokens(systemPrompt, userPrompt);
     }
+
 
     await this.delayIfNeeded();
     const response = await this.openai.chat.completions.create({
@@ -476,20 +513,69 @@ export class RAGQueryEngine {
     };
   }
 
-  private buildRetrievalPlan(question: string, lengthPreferences: LengthPreferences, manualMaxSources?: number): RetrievalPlan {
-    const highDetail = this.isHighDetailRequest(question) || lengthPreferences.parts >= 5 || lengthPreferences.tokensPerPart >= 1000;
+  private async calculateAdaptiveLimits(question: string, highDetail: boolean, availableTokens: number): Promise<{pageLimit: number, chunkLimit: number}> {
+    // Получаем информацию о коллекции документов
+    const documents = await this.embeddings.getStoredDocuments();
+    const totalPages = documents.reduce((sum, doc) => sum + doc.fullPages.length, 0);
 
+    // Базовые лимиты из конфигурации
+    let targetPages = highDetail ? ADAPTIVE_SEARCH_CONFIG.maxPages : ADAPTIVE_SEARCH_CONFIG.minPages;
+
+    // Адаптируем под размер коллекции
+    if (totalPages < ADAPTIVE_SEARCH_CONFIG.minPages) {
+      // Если документов меньше минимума - берем все
+      targetPages = totalPages;
+    } else if (totalPages > ADAPTIVE_SEARCH_CONFIG.maxPages) {
+      // Если документов больше максимума - ограничиваем
+      targetPages = highDetail ? ADAPTIVE_SEARCH_CONFIG.maxPages : ADAPTIVE_SEARCH_CONFIG.minPages;
+    } else {
+      // Если документов в пределах нормы - берем все доступные
+      targetPages = totalPages;
+    }
+
+    // Проверяем ограничения по токенам
+    const estimatedTokensForPages = targetPages * ADAPTIVE_SEARCH_CONFIG.avgTokensPerPage;
+    if (estimatedTokensForPages > availableTokens) {
+      // Если не хватает токенов - уменьшаем количество страниц
+      targetPages = Math.floor(availableTokens / ADAPTIVE_SEARCH_CONFIG.avgTokensPerPage);
+      targetPages = Math.max(1, Math.min(targetPages, ADAPTIVE_SEARCH_CONFIG.maxPages));
+    }
+
+    // Рассчитываем лимит chunks
+    const chunkLimit = targetPages * ADAPTIVE_SEARCH_CONFIG.chunksPerPage;
+
+    return {
+      pageLimit: targetPages,
+      chunkLimit: chunkLimit
+    };
+  }
+
+  private async buildRetrievalPlan(question: string, targetParts: PartPlan[], manualMaxSources?: number): Promise<RetrievalPlan> {
+    const avgTokensPerPart = targetParts.reduce((sum, part) => sum + (part.tokens || DEFAULT_TOKENS_PER_PART), 0) / Math.max(targetParts.length, 1);
+    const highDetail = this.isHighDetailRequest(question) || targetParts.length >= 5 || avgTokensPerPart >= 1000;
+
+    const estimatedOutput = targetParts.reduce((sum, part) => sum + (part.tokens || DEFAULT_TOKENS_PER_PART), 0) * DEFAULT_PART_BUFFER_RATIO;
+    const availableForContext = MODEL_CONTEXT_TOKEN_LIMIT - estimatedOutput - CONTEXT_SAFETY_MARGIN;
+
+    // Адаптивно рассчитываем лимиты
+    const adaptiveLimits = await this.calculateAdaptiveLimits(question, highDetail, availableForContext);
+
+    // Учитываем ручное ограничение если задано
     const chunkLimit = manualMaxSources
       ? Math.max(40, manualMaxSources)
-      : highDetail
-        ? 280
-        : 160;
+      : adaptiveLimits.chunkLimit;
 
-    const pageLimit = highDetail ? 40 : 20;
+    const pageLimit = adaptiveLimits.pageLimit;
 
-    const estimatedOutput = lengthPreferences.parts * lengthPreferences.tokensPerPart * DEFAULT_PART_BUFFER_RATIO;
-    const availableForContext = MODEL_CONTEXT_TOKEN_LIMIT - estimatedOutput - CONTEXT_SAFETY_MARGIN;
-    const maxContextTokens = Math.max(8000, Math.min(availableForContext, highDetail ? 70000 : 40000));
+    // Пересчитываем максимальные токены контекста на основе реальных лимитов
+    const estimatedContextTokens = pageLimit * ADAPTIVE_SEARCH_CONFIG.avgTokensPerPage;
+    const safeTokenLimit = Math.min(
+      availableForContext,
+      estimatedContextTokens,
+      25000  // Жесткий лимит для безопасности (оставляем запас от 30k TPM)
+    );
+    const maxContextTokens = safeTokenLimit;
+
 
     return {
       chunkLimit,
@@ -509,7 +595,10 @@ export class RAGQueryEngine {
 
     const selectedPages: FullPage[] = [];
     let pageTokensUsed = 0;
-    const maxPageTokens = Math.min(Math.floor(tokenBudget * 0.25), 12000);
+    // Динамическое распределение токенов в зависимости от количества страниц
+    const pageCount = pages.length;
+    const pageTokensRatio = pageCount <= 5 ? 0.4 : pageCount <= 15 ? 0.3 : 0.25;
+    const maxPageTokens = Math.floor(tokenBudget * pageTokensRatio);
 
     for (const page of pages) {
       const pageTokens = page.tokens || estimateTokens(page.fullContent);
@@ -520,7 +609,7 @@ export class RAGQueryEngine {
       pageTokensUsed += pageTokens;
     }
 
-    const remainingBudget = Math.max(tokenBudget - pageTokensUsed, 2000);
+    const remainingBudget = Math.max(tokenBudget - pageTokensUsed, 4000); // Больше места для chunks
     const selectedChunks: EmbeddedChunk[] = [];
     let chunkTokensUsed = 0;
 
@@ -554,10 +643,13 @@ export class RAGQueryEngine {
   }
 
   private createPartPrompt(originalQuestion: string, partQuery: PartQuery, context: string, language: 'ru' | 'en'): string {
+    // Используем полный контекст без урезания
+    let optimizedContext = context;
+
     const requirements = language === 'ru'
       ? [
           'ÃÅ¡ÃÂ¾ÃÂ½Ã‘â€šÃÂµÃÂºÃ‘ÂÃ‘â€š (ÃÂ¸Ã‘ÂÃÂ¿ÃÂ¾ÃÂ»Ã‘Å’ÃÂ·Ã‘Æ’ÃÂ¹Ã‘â€šÃÂµ Ã‘â€šÃÂ¾ÃÂ»Ã‘Å’ÃÂºÃÂ¾ Ã‘ÂÃ‘â€šÃÂ¸ ÃÂ¼ÃÂ°Ã‘â€šÃÂµÃ‘â‚¬ÃÂ¸ÃÂ°ÃÂ»Ã‘â€¹):',
-          context,
+          optimizedContext,
           'ÃÅ¾Ã‘ÂÃÂ½ÃÂ¾ÃÂ²ÃÂ½ÃÂ¾ÃÂ¹ ÃÂ¸Ã‘ÂÃ‘ÂÃÂ»ÃÂµÃÂ´ÃÂ¾ÃÂ²ÃÂ°Ã‘â€šÃÂµÃÂ»Ã‘Å’Ã‘ÂÃÂºÃÂ¸ÃÂ¹ ÃÂ²ÃÂ¾ÃÂ¿Ã‘â‚¬ÃÂ¾Ã‘Â:',
           originalQuestion,
           'ÃÂ¢ÃÂµÃÂºÃ‘Æ’Ã‘â€°ÃÂ°Ã‘Â Ã‘â€¡ÃÂ°Ã‘ÂÃ‘â€šÃ‘Å’ ÃÂ¸Ã‘ÂÃ‘ÂÃÂ»ÃÂµÃÂ´ÃÂ¾ÃÂ²ÃÂ°ÃÂ½ÃÂ¸Ã‘Â:',
@@ -572,7 +664,7 @@ export class RAGQueryEngine {
         ]
       : [
           'Context (use only the following materials):',
-          context,
+          optimizedContext,
           'Primary research question:',
           originalQuestion,
           'Current section of the report:',
@@ -580,7 +672,7 @@ export class RAGQueryEngine {
           `Target length: at least ${partQuery.plan.tokens} tokens`,
           `Focus areas: ${partQuery.focusKeywords.join(', ')}`,
           'Response requirements:',
-          '- Write rich paragraphs (no bullet lists unless explicitly requested).',
+          '- Structure your response with numbered subsections (e.g., 3.1, 3.2, 3.3) according to the numbering specified in the content outline or prompt, and rich paragraphs.',
           '- Use evidence from the context and cite sources in the format [File name, section X] or [File name, page X].',
           '- Connect the findings of this section to the overall research aim.',
           '- Do not summarise future sections; stay within the current part.'
@@ -643,7 +735,7 @@ export class RAGQueryEngine {
   }
 
   private async delayIfNeeded(): Promise<void> {
-    const delayMs = 2000;
+    const delayMs = 15000; // 15 секунд между запросами для соблюдения лимитов
     await new Promise(resolve => setTimeout(resolve, delayMs));
   }
 
