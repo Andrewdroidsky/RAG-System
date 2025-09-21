@@ -15,7 +15,6 @@ export default function UniversalCostCalculator() {
 
   // Conversion ratios
   const WORDS_TO_TOKENS = 1.8; // 1 word ≈ 1.8 tokens
-  const TOKENS_TO_WORDS = 0.55; // 1 token ≈ 0.55 words
 
   // OpenAI GPT-4o-mini pricing
   const GPT4_INPUT_COST_PER_1K = 0.00015;  // $0.000150 per 1K input tokens

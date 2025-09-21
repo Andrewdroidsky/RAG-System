@@ -49,8 +49,6 @@ const MODEL_CONTEXT_TOKEN_LIMIT = 120000;
 const CONTEXT_SAFETY_MARGIN = 2000;
 const MIN_OUTPUT_TOKENS = 512;
 const DEFAULT_TOKENS_PER_PART = 1200;
-const RATE_LIMIT_TOKENS_PER_REQUEST = 15000;  // Снижаем лимит вдвое
-const RATE_LIMIT_SAFETY_MARGIN = 3000;
 
 // Адаптивные параметры поиска
 const ADAPTIVE_SEARCH_CONFIG = {
@@ -130,13 +128,7 @@ function isDiagnosticsRequest(request: string): boolean {
   return DIAGNOSTIC_KEYWORDS.some(keyword => lower.includes(keyword));
 }
 
-function parseSpecificPartRequest(request: string): { isSpecific: boolean; requestedParts: number[] } {
-  // Убираем весь этот сложный парсер - он все ломает
-  return {
-    isSpecific: false,
-    requestedParts: []
-  };
-}
+// Удалена неиспользуемая функция parseSpecificPartRequest
 
 function mergeChunks(primary: EmbeddedChunk[], secondary: EmbeddedChunk[]): EmbeddedChunk[] {
   const map = new Map<string, EmbeddedChunk>();
@@ -644,7 +636,7 @@ export class RAGQueryEngine {
 
   private createPartPrompt(originalQuestion: string, partQuery: PartQuery, context: string, language: 'ru' | 'en'): string {
     // Используем полный контекст без урезания
-    let optimizedContext = context;
+    const optimizedContext = context;
 
     const requirements = language === 'ru'
       ? [

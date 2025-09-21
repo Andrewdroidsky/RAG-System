@@ -219,7 +219,7 @@ function calculateHierarchyRelevance(chunk: EmbeddedChunk, part: PartPlan, keywo
   hierarchyScore += structuralBonus;
 
   // 5. Штраф за несоответствие структурного контекста
-  const structuralPenalty = calculateStructuralPenalty(hierarchy, part, keywords);
+  const structuralPenalty = calculateStructuralPenalty(hierarchy, part);
   hierarchyScore -= structuralPenalty;
 
   return Math.min(5, hierarchyScore); // Ограничиваем максимальный бонус
@@ -247,7 +247,7 @@ function calculateStructuralPositionBonus(structuralContext: string, part: PartP
   return 0;
 }
 
-function calculateStructuralPenalty(hierarchy: EmbeddedChunk['metadata']['hierarchy'], part: PartPlan, keywords: string[]): number {
+function calculateStructuralPenalty(hierarchy: EmbeddedChunk['metadata']['hierarchy'], part: PartPlan): number {
   let penalty = 0;
 
   // Штраф если chunk явно относится к другой теме
